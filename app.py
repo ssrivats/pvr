@@ -1,6 +1,5 @@
 """
-PVR Watchlist Backend – From Scratch
-Focused on Sathyam, Express Avenue & Palazzo
+PVR Watchlist Backend – Simple Version (No Playwright)
 """
 
 import json, logging, os, re, threading, time, uuid, requests
@@ -33,14 +32,6 @@ if REDIS_URL:
         pass
 
 MAX_WATCHLIST_PER_PHONE = 10
-
-THEATERS = {
-    "SATHYAM": {"name": "PVR Sathyam"},
-    "EXPRESS": {"name": "HDFC Millennia PVR Express Avenue"},
-    "PALAZZO": {"name": "PVR Palazzo"},
-}
-
-BMS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 def _save(watch_id, data):
     if _redis:
@@ -83,57 +74,11 @@ def _parse_seat_layout_api(data):
         pass
     return {"found": False}
 
-# Seed session for PVR (simpler flow)
-def _seed_session(event_code, movie_slug, watch_id):
-    from playwright.sync_api import sync_playwright
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-            context = browser.new_context(user_agent=BMS_UA)
-            page = context.new_page()
-
-            seat_payloads = []
-            def handle(response):
-                if "seatlayout" in response.url.lower() or "seatmap" in response.url.lower():
-                    seat_payloads.append({"url": response.url, "json": response.json()})
-
-            page.on("response", handle)
-
-            page.goto(f"https://pvrcinemas.com/movie-details/{movie_slug}", timeout=60000)
-            page.wait_for_timeout(15000)
-
-            cookies = {c["name"]: c["value"] for c in context.cookies()}
-            headers = {"User-Agent": BMS_UA}
-
-            if seat_payloads:
-                _log(watch_id, "✅ PVR session seeded successfully", "start")
-                return {
-                    "cookies": cookies,
-                    "headers": headers,
-                    "seatlayout_url": seat_payloads[0]["url"]
-                }
-            else:
-                _log(watch_id, "No seatlayout captured during seeding", "warn")
-    except Exception as e:
-        _log(watch_id, f"PVR seeding failed: {e}", "error")
-    return None
-
-# Poll seats
-def _poll_seats(session_data):
-    try:
-        resp = requests.get(
-            session_data["seatlayout_url"],
-            cookies=session_data["cookies"],
-            headers=session_data["headers"],
-            timeout=15
-        )
-        if resp.status_code == 200:
-            return _parse_seat_layout_api(resp.json())
-    except:
-        pass
+# Simple polling (placeholder - you can improve later)
+def _poll_seats():
+    # For now return false. We will add real logic after build succeeds
     return {"found": False}
 
-# Alert
 def _send_alert(watch_id, movie_title, phone, found_seats):
     if not phone.startswith("+"):
         phone = f"+91{phone}"
@@ -146,7 +91,6 @@ def _send_alert(watch_id, movie_title, phone, found_seats):
         client = Client(TWILIO_SID, TWILIO_TOKEN)
         client.messages.create(body=msg, from_=TWILIO_FROM, to=f"whatsapp:{phone}")
 
-# Monitoring thread
 def _run_monitor(watch_id):
     item = _load(watch_id)
     if not item: return
@@ -154,16 +98,6 @@ def _run_monitor(watch_id):
     event_code = item["eventCode"]
     phone = item["phone"]
     movie_title = item["movie"]
-    movie_slug = item.get("movieSlug") or _slugify(movie_title)
-
-    if not item.get("session_data"):
-        session = _seed_session(event_code, movie_slug, watch_id)
-        if not session:
-            item["status"] = "error"
-            _save(watch_id, item)
-            return
-        item["session_data"] = session
-        _save(watch_id, item)
 
     item["status"] = "monitoring"
     _save(watch_id, item)
@@ -173,10 +107,10 @@ def _run_monitor(watch_id):
         if item["status"] != "monitoring":
             break
 
-        result = _poll_seats(item["session_data"])
+        result = _poll_seats()
 
         if result.get("found"):
-            _send_alert(watch_id, movie_title, phone, result["available"])
+            _send_alert(watch_id, movie_title, phone, result.get("available", []))
             item["status"] = "alert_sent"
             _save(watch_id, item)
             break
@@ -197,7 +131,6 @@ def add_watch():
     item = {
         "id": watch_id,
         "movie": movie,
-        "movieSlug": _slugify(movie),
         "eventCode": event_code,
         "phone": phone,
         "status": "starting",
